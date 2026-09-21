@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Optional
 
 from . import __version__, db, export, paths
-from .backends import GitBackend, S3Backend, SyncBackend, get_backend, load_config, save_config
+from .backends import (
+    GitBackend,
+    S3Backend,
+    SyncBackend,
+    get_backend,
+    load_config,
+    save_config,
+)
 from .importer import (
     copy_between_workspaces,
     doctor_audit,
@@ -51,9 +58,10 @@ def _delete_snapshot(path: Path):
     meta = path.parent / f"{sid}.meta.json"
     if meta.exists():
         meta.unlink()
+
+
 from .reload import print_reload_hint
 from .watch import watch_loop
-
 
 
 def _ensure_synced() -> None:
@@ -77,7 +85,11 @@ def _resolve_project(args) -> str:
             )
             sys.exit(1)
         return ws["path"]
-    return args.project if (hasattr(args, "project") and args.project) else paths.get_project_path()
+    return (
+        args.project
+        if (hasattr(args, "project") and args.project)
+        else paths.get_project_path()
+    )
 
 
 def _resolve_project_and_workspace(args) -> tuple[str, "Path | None", str | None]:
@@ -97,7 +109,11 @@ def _resolve_project_and_workspace(args) -> tuple[str, "Path | None", str | None
             )
             sys.exit(1)
         return ws["path"], ws["workspace_dir"], ws.get("host")
-    project = args.project if (hasattr(args, "project") and args.project) else paths.get_project_path()
+    project = (
+        args.project
+        if (hasattr(args, "project") and args.project)
+        else paths.get_project_path()
+    )
     return project, None, None
 
 
@@ -121,11 +137,17 @@ def _resolve_workspace_for_import(args) -> tuple[str, "Path | None"]:
             sys.exit(1)
         return ws["path"], ws["workspace_dir"]
 
-    project_path = args.project if (hasattr(args, "project") and args.project) else paths.get_project_path()
+    project_path = (
+        args.project
+        if (hasattr(args, "project") and args.project)
+        else paths.get_project_path()
+    )
     return project_path, None
 
 
-def _workspace_sync_summary(ws: dict, _global_cdb: "Optional[db.CursorDB]" = None) -> str:
+def _workspace_sync_summary(
+    ws: dict, _global_cdb: "Optional[db.CursorDB]" = None
+) -> str:
     """Compute a short sync summary for a workspace.
 
     Reads the workspace's conversations and checks each against snapshots.
@@ -168,7 +190,9 @@ def cmd_workspaces(args):
         print("No workspaces with conversations found.")
         return
 
-    print(f"{'#':<4} {'Type':<10} {'Path':<38} {'Host':<12} {'Chats':>5}  {'Hash':<9}  {'Sync Status'}")
+    print(
+        f"{'#':<4} {'Type':<10} {'Path':<38} {'Host':<12} {'Chats':>5}  {'Hash':<9}  {'Sync Status'}"
+    )
     print("-" * 115)
 
     global_db_path = paths.get_global_db_path()
@@ -183,7 +207,9 @@ def cmd_workspaces(args):
             sync = _workspace_sync_summary(ws, _global_cdb=global_cdb)
             ws_hash = ws["workspace_dir"].name[:8]
 
-            print(f"{i:<4} {ws['type']:<10} {path:<38} {host:<12} {convos:>5}  {ws_hash}  {sync}")
+            print(
+                f"{i:<4} {ws['type']:<10} {path:<38} {host:<12} {convos:>5}  {ws_hash}  {sync}"
+            )
     finally:
         if global_cdb:
             global_cdb.close()
@@ -195,15 +221,15 @@ def cmd_workspaces(args):
 def _is_remote_path(path: str, source_machine: str) -> bool:
     """Check if a path looks like it came from an SSH remote session."""
     import platform
-    
+
     # If path doesn't exist locally, it's likely remote
     if not os.path.exists(path):
         return True
-    
+
     # On Mac, local paths start with /Users
     if platform.system() == "Darwin" and not path.startswith("/Users"):
         return True
-    
+
     return False
 
 
@@ -242,7 +268,9 @@ def cmd_snapshots(args):
 
                 if len(chat_name) > 36:
                     chat_name = chat_name[:33] + "..."
-                print(f"    {chat_name:<38} {msgs:>5} msgs  from {source:<16} {status_label}")
+                print(
+                    f"    {chat_name:<38} {msgs:>5} msgs  from {source:<16} {status_label}"
+                )
     finally:
         if global_cdb:
             global_cdb.close()
@@ -261,7 +289,9 @@ def cmd_init(args):
         bucket = getattr(args, "bucket", None)
         if not bucket:
             print("Error: --bucket is required for S3 backend.", file=sys.stderr)
-            print("  cursaves init --backend s3 --bucket my-cursor-saves", file=sys.stderr)
+            print(
+                "  cursaves init --backend s3 --bucket my-cursor-saves", file=sys.stderr
+            )
             sys.exit(1)
 
         snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -294,8 +324,13 @@ def cmd_init(args):
             if backend.is_initialized():
                 print(f"\n  Bucket access verified.")
             else:
-                print(f"\n  Warning: Could not access bucket '{bucket}'.", file=sys.stderr)
-                print(f"  Check your AWS credentials and bucket permissions.", file=sys.stderr)
+                print(
+                    f"\n  Warning: Could not access bucket '{bucket}'.", file=sys.stderr
+                )
+                print(
+                    f"  Check your AWS credentials and bucket permissions.",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(f"\n  Warning: Could not verify bucket access: {e}", file=sys.stderr)
 
@@ -306,7 +341,9 @@ def cmd_init(args):
     if paths.is_sync_repo_initialized():
         config = load_config()
         if config.get("backend") == "s3":
-            print(f"Currently configured with S3 backend (bucket: {config.get('s3', {}).get('bucket')})")
+            print(
+                f"Currently configured with S3 backend (bucket: {config.get('s3', {}).get('bucket')})"
+            )
             if args.remote:
                 print("Switching to git backend...")
                 config["backend"] = "git"
@@ -328,7 +365,9 @@ def cmd_init(args):
 
     if args.remote:
         print(f"  Added remote: {args.remote}")
-        print(f"\nDone. Run 'cursaves push' from any project directory to start syncing.")
+        print(
+            f"\nDone. Run 'cursaves push' from any project directory to start syncing."
+        )
     else:
         print(f"\nDone. To sync between machines, add a remote:")
         print(f"  cursaves init --remote git@github.com:you/my-cursaves.git")
@@ -591,7 +630,9 @@ def _select_workspace() -> tuple[str, "Path", str | None] | None:
     return ws["path"], ws["workspace_dir"], ws.get("host")
 
 
-def _select_conversations(project_path: str, prompt: str = "push", workspace_dir: "Path | None" = None) -> list[str]:
+def _select_conversations(
+    project_path: str, prompt: str = "push", workspace_dir: "Path | None" = None
+) -> list[str]:
     """Show conversations for a workspace and let the user pick.
 
     Returns a list of selected composer IDs, or empty list.
@@ -634,28 +675,36 @@ def _find_ahead_conversations() -> list[dict]:
             project_id = paths.get_project_identifier(ws["path"])
 
             for cid in composer_ids:
-                status = get_push_status_for_conversation(cid, project_id, _cdb=global_cdb)
+                status = get_push_status_for_conversation(
+                    cid, project_id, _cdb=global_cdb
+                )
                 if status == "local_ahead":
                     # Get chat name from global DB
                     cd = global_cdb.get_json(f"composerData:{cid}")
                     name = cd.get("name", "Untitled") if cd else "Untitled"
 
-                    ws_name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
+                    ws_name = (
+                        os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
+                    )
                     host = ws.get("host", "")
                     ws_label = f"{ws_name} ({host})" if host else ws_name
-                    ahead_items.append({
-                        "composerId": cid,
-                        "name": name,
-                        "workspace_label": ws_label,
-                        "workspace_dir": ws_dir,
-                        "project_path": ws["path"],
-                        "host": host,
-                    })
+                    ahead_items.append(
+                        {
+                            "composerId": cid,
+                            "name": name,
+                            "workspace_label": ws_label,
+                            "workspace_dir": ws_dir,
+                            "project_path": ws["path"],
+                            "host": host,
+                        }
+                    )
 
     return ahead_items
 
 
-def _export_and_push(sync_dir: Path, items: list[dict], backend: Optional[SyncBackend] = None) -> int:
+def _export_and_push(
+    sync_dir: Path, items: list[dict], backend: Optional[SyncBackend] = None
+) -> int:
     """Export a list of ahead conversation items and push via the backend.
 
     Returns the number of conversations successfully exported.
@@ -697,7 +746,9 @@ def _export_and_push(sync_dir: Path, items: list[dict], backend: Optional[SyncBa
     return total_saved
 
 
-def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBackend] = None) -> int:
+def _push_ahead(
+    sync_dir: Path, auto: bool = False, backend: Optional[SyncBackend] = None
+) -> int:
     """Find conversations ahead of snapshots and push them.
 
     Args:
@@ -895,7 +946,8 @@ def _pull_behind(sync_dir: Path) -> int:
                         backed_up_ws.add(ws_dir_str)
 
                     ok = import_snapshot(
-                        sf, ws["path"],
+                        sf,
+                        ws["path"],
                         target_workspace_dir=ws["workspace_dir"],
                         skip_backup=True,
                     )
@@ -987,7 +1039,10 @@ def cmd_push(args):
     # Step 0: Pull latest from remote
     if backend.has_remote():
         if not backend.pull(snapshots_dir):
-            print("Warning: Could not sync with remote, continuing anyway...", file=sys.stderr)
+            print(
+                "Warning: Could not sync with remote, continuing anyway...",
+                file=sys.stderr,
+            )
 
     # Resolve workspace and select conversations
     composer_ids = None
@@ -1003,7 +1058,9 @@ def cmd_push(args):
 
     # Always show conversation list for selection (unless --all flag)
     if not getattr(args, "all_chats", False):
-        composer_ids = _select_conversations(project_path, prompt="push", workspace_dir=workspace_dir)
+        composer_ids = _select_conversations(
+            project_path, prompt="push", workspace_dir=workspace_dir
+        )
         if not composer_ids:
             print("No conversations selected.")
             return
@@ -1014,8 +1071,10 @@ def cmd_push(args):
     else:
         print(f"Checkpointing all conversations for {project_path}...")
     saved = export.checkpoint_project(
-        project_path, composer_ids=composer_ids,
-        workspace_dir=workspace_dir, source_host=source_host,
+        project_path,
+        composer_ids=composer_ids,
+        workspace_dir=workspace_dir,
+        source_host=source_host,
     )
 
     if not saved:
@@ -1094,7 +1153,9 @@ def cmd_pull(args):
         for p in projects:
             sources = ", ".join(sorted(p["sources"])) or "unknown"
             last_saved = p.get("latest_export", "")[:16] or "unknown"
-            display = f"{p['name']:<30} {p['count']:>3} chats  {last_saved}  from {sources}"
+            display = (
+                f"{p['name']:<30} {p['count']:>3} chats  {last_saved}  from {sources}"
+            )
             project_choices.append({"name": display, "_project": p})
 
         selected_project = select_one(
@@ -1112,14 +1173,16 @@ def cmd_pull(args):
             for sf in snapshot_files:
                 meta = read_snapshot_meta(sf)
                 source_host = meta.get("sourceHost")
-                snapshots_info.append({
-                    "file": sf,
-                    "composerId": meta.get("composerId"),
-                    "name": meta.get("name") or "Untitled",
-                    "msgs": meta.get("messageCount", 0),
-                    "exported": (meta.get("exportedAt") or "")[:16] or "unknown",
-                    "source": source_host or meta.get("sourceMachine") or "unknown",
-                })
+                snapshots_info.append(
+                    {
+                        "file": sf,
+                        "composerId": meta.get("composerId"),
+                        "name": meta.get("name") or "Untitled",
+                        "msgs": meta.get("messageCount", 0),
+                        "exported": (meta.get("exportedAt") or "")[:16] or "unknown",
+                        "source": source_host or meta.get("sourceMachine") or "unknown",
+                    }
+                )
 
             if not snapshots_info:
                 print(f"  No snapshots in {project['name']}/")
@@ -1131,20 +1194,28 @@ def cmd_pull(args):
                 continue
 
             selected_files = [s["file"] for s in selected_snaps]
-            print(f"\n  Importing {len(selected_files)} chat(s) from {project['name']}/...")
+            print(
+                f"\n  Importing {len(selected_files)} chat(s) from {project['name']}/..."
+            )
 
             # Find target workspace
             target_workspaces = _select_target_workspaces(project["source_paths"])
 
             if not target_workspaces:
                 cwd = os.getcwd()
-                cwd_basename = os.path.basename(os.path.normpath(cwd))
-                source_basenames = {os.path.basename(os.path.normpath(sp)) for sp in project["source_paths"]}
-                if cwd_basename in source_basenames or project["name"] == paths.get_project_identifier(cwd):
+                cwd_basename = paths.path_basename(cwd)
+                source_basenames = {
+                    paths.path_basename(sp) for sp in project["source_paths"]
+                }
+                if cwd_basename in source_basenames or project[
+                    "name"
+                ] == paths.get_project_identifier(cwd):
                     target_path = cwd
                 else:
                     print(f"  No matching workspaces found.")
-                    print(f"  Enter a local project path to import into (or press Enter to skip):")
+                    print(
+                        f"  Enter a local project path to import into (or press Enter to skip):"
+                    )
                     try:
                         target_path = input("  > ").strip()
                     except (EOFError, KeyboardInterrupt):
@@ -1168,7 +1239,9 @@ def cmd_pull(args):
                     print(f"  Importing into: {display}")
                     for sf in selected_files:
                         print(f"    {sf.name}...")
-                        if import_snapshot(sf, ws["path"], target_workspace_dir=ws["workspace_dir"]):
+                        if import_snapshot(
+                            sf, ws["path"], target_workspace_dir=ws["workspace_dir"]
+                        ):
                             total_success += 1
                         else:
                             total_failure += 1
@@ -1186,9 +1259,12 @@ def cmd_pull(args):
         if workspace_dir:
             # Show which workspace we're importing into
             ws_info = paths.format_workspace_display(
-                {"type": "ssh" if "ssh" in str(workspace_dir) else "local",
-                 "host": None, "path": project_path},
-                include_path=True
+                {
+                    "type": "ssh" if "ssh" in str(workspace_dir) else "local",
+                    "host": None,
+                    "path": project_path,
+                },
+                include_path=True,
             )
             print(f"Importing into workspace: {project_path}")
         else:
@@ -1258,14 +1334,18 @@ def cmd_copy(args):
     print(f"\n  Copying {len(composer_ids)} chat(s): {source_label} → {target_label}\n")
 
     success, failure = copy_between_workspaces(
-        composer_ids, source_ws_dir, target_ws_dir,
-        source_path=source_path, target_path=target_path,
+        composer_ids,
+        source_ws_dir,
+        target_ws_dir,
+        source_path=source_path,
+        target_path=target_path,
         force=getattr(args, "force", False),
     )
 
     if success > 0:
         print(f"\nDone. Copied {success} chat(s).")
         from .reload import print_reload_hint
+
         print_reload_hint()
     elif failure > 0:
         print(f"\nFailed to copy {failure} chat(s).")
@@ -1337,7 +1417,9 @@ def cmd_delete(args):
 
         total_count = sum(p["count"] for p in projects)
         if not args.yes:
-            print(f"This will delete {total_count} snapshot(s) across {len(projects)} project(s):")
+            print(
+                f"This will delete {total_count} snapshot(s) across {len(projects)} project(s):"
+            )
             for p in projects:
                 print(f"  {p['name']}: {p['count']} snapshot(s)")
             try:
@@ -1387,7 +1469,9 @@ def cmd_delete(args):
         selected_projects = [s["_project"] for s in selected]
         total_count = sum(p["count"] for p in selected_projects)
 
-        if not tui_confirm(f"Delete {total_count} snapshot(s) across {len(selected_projects)} project(s)?"):
+        if not tui_confirm(
+            f"Delete {total_count} snapshot(s) across {len(selected_projects)} project(s)?"
+        ):
             print("Cancelled.")
             return
 
@@ -1399,7 +1483,9 @@ def cmd_delete(args):
             total_deleted += p["count"]
             deleted_names.append(p["name"])
 
-        print(f"\nDeleted {total_deleted} snapshot(s) across {len(indices)} project(s).")
+        print(
+            f"\nDeleted {total_deleted} snapshot(s) across {len(indices)} project(s)."
+        )
 
         # Sync deletion to remote
         hostname = paths.get_machine_id()
@@ -1468,7 +1554,9 @@ def cmd_delete(args):
 
         # Sync deletion to remote
         hostname = paths.get_machine_id()
-        if _commit_and_push(sync_dir, f"[{hostname}] delete {_get_snapshot_id(match)[:12]}"):
+        if _commit_and_push(
+            sync_dir, f"[{hostname}] delete {_get_snapshot_id(match)[:12]}"
+        ):
             print("Synced to remote.")
         return
 
@@ -1483,7 +1571,9 @@ def cmd_delete(args):
 
         if len(name) > 33:
             name = name[:30] + "..."
-        snapshot_info.append({"file": f, "name": name, "exported_at": exported_at, "source": source})
+        snapshot_info.append(
+            {"file": f, "name": name, "exported_at": exported_at, "source": source}
+        )
         print(f"  {i:<4} {name:<35} {exported_at[:19]:<20} from {source}")
 
     print(f"\nEnter numbers to delete (e.g. 1,3,5 or 1-3 or 'all'):")
@@ -1510,7 +1600,9 @@ def cmd_delete(args):
 
     # Sync deletion to remote
     hostname = paths.get_machine_id()
-    if _commit_and_push(sync_dir, f"[{hostname}] delete {len(indices)} from {project_id}"):
+    if _commit_and_push(
+        sync_dir, f"[{hostname}] delete {len(indices)} from {project_id}"
+    ):
         print("Synced to remote.")
 
 
@@ -1539,9 +1631,7 @@ def cmd_doctor(args):
     )
 
     if audit["workspaces"]:
-        print(
-            f"  ─── Workspaces with chats ───────────────────────────────────\n"
-        )
+        print(f"  ─── Workspaces with chats ───────────────────────────────────\n")
         for ws in audit["workspaces"]:
             print(f"  {ws['chat_count']:>3} chats   {ws['label']}")
         print()
@@ -1586,11 +1676,14 @@ def cmd_doctor(args):
             selected_ids = [o["composerId"] for o in orphaned]
 
         print(f"\n  Recovering {len(selected_ids)} chat(s)...\n")
-        recovered, failed = doctor_recover(composer_ids=selected_ids, force=getattr(args, "force", False))
+        recovered, failed = doctor_recover(
+            composer_ids=selected_ids, force=getattr(args, "force", False)
+        )
 
         if recovered > 0:
             print(f"\n  Recovered {recovered} chat(s).")
             from .reload import print_reload_hint
+
             print_reload_hint()
         if failed > 0:
             print(f"  {failed} chat(s) could not be matched to a workspace.")
@@ -1619,8 +1712,7 @@ def cmd_purge(args):
     if ws_filter:
         ws_filter_lower = ws_filter.lower()
         all_chats = [
-            c for c in all_chats
-            if ws_filter_lower in c["workspace_label"].lower()
+            c for c in all_chats if ws_filter_lower in c["workspace_label"].lower()
         ]
         if not all_chats:
             print(f"  No chats matching workspace '{ws_filter}'.")
@@ -1645,10 +1737,7 @@ def cmd_purge(args):
     selected_keys = sum(
         c["keyCount"] for c in all_chats if c["composerId"] in set(selected_ids)
     )
-    print(
-        f"\n  Will delete {len(selected_ids)} chat(s) "
-        f"({selected_keys:,} DB keys)."
-    )
+    print(f"\n  Will delete {len(selected_ids)} chat(s) ({selected_keys:,} DB keys).")
 
     if not tui_confirm("Continue with deletion?"):
         print("  Cancelled.")
@@ -1680,6 +1769,7 @@ def cmd_migrate(args):
 
     if not dry_run and migrated > 0:
         from .reload import print_reload_hint
+
         print_reload_hint()
 
 
@@ -1697,21 +1787,26 @@ def main():
     # Helper to add -w and -p flags to a subparser
     def add_project_args(p):
         p.add_argument(
-            "--workspace", "-w",
+            "--workspace",
+            "-w",
             help="Workspace number, hash, or path substring from 'cursaves workspaces'",
         )
-        p.add_argument("--project", "-p", help="Project path (default: current directory)")
+        p.add_argument(
+            "--project", "-p", help="Project path (default: current directory)"
+        )
 
     # ── init ────────────────────────────────────────────────────────
     p_init = subparsers.add_parser(
         "init", help="Initialize sync (git repo, S3 bucket, etc.)"
     )
     p_init.add_argument(
-        "--remote", "-r",
+        "--remote",
+        "-r",
         help="Git remote URL (e.g., git@github.com:you/my-saves.git)",
     )
     p_init.add_argument(
-        "--backend", "-b",
+        "--backend",
+        "-b",
         choices=["git", "s3"],
         help="Sync backend to use (default: git)",
     )
@@ -1744,7 +1839,9 @@ def main():
     # ── list ────────────────────────────────────────────────────────
     p_list = subparsers.add_parser("list", help="List conversations for a project")
     add_project_args(p_list)
-    p_list.add_argument("--json", action="store_true", help="Output as JSON for scripting")
+    p_list.add_argument(
+        "--json", action="store_true", help="Output as JSON for scripting"
+    )
     p_list.set_defaults(func=cmd_list)
 
     # ── export ──────────────────────────────────────────────────────
@@ -1762,15 +1859,19 @@ def main():
 
     # ── import ──────────────────────────────────────────────────────
     p_import = subparsers.add_parser("import", help="Import conversation snapshots")
-    p_import.add_argument("--all", action="store_true", help="Import all snapshots for the project")
+    p_import.add_argument(
+        "--all", action="store_true", help="Import all snapshots for the project"
+    )
     p_import.add_argument("--file", "-f", help="Import a specific snapshot file")
     add_project_args(p_import)
     p_import.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Suppress the Cursor-running warning",
     )
     p_import.add_argument(
-        "--reload", action="store_true",
+        "--reload",
+        action="store_true",
         help="(deprecated, no effect) Cursor requires a full restart to see imports",
     )
     p_import.set_defaults(func=cmd_import)
@@ -1781,15 +1882,21 @@ def main():
     )
     add_project_args(p_push)
     p_push.add_argument(
-        "--select", "-s", action="store_true",
+        "--select",
+        "-s",
+        action="store_true",
         help="Interactively select workspace first",
     )
     p_push.add_argument(
-        "--all", dest="all_chats", action="store_true",
+        "--all",
+        dest="all_chats",
+        action="store_true",
         help="Push all conversations without selection prompt",
     )
     p_push.add_argument(
-        "--ahead", "-a", action="store_true",
+        "--ahead",
+        "-a",
+        action="store_true",
         help="Find and push all conversations ahead of snapshots across all workspaces",
     )
     p_push.set_defaults(func=cmd_push)
@@ -1799,33 +1906,42 @@ def main():
         "pull", help="Git pull + import snapshots (one command to sync and restore)"
     )
     p_pull.add_argument(
-        "--workspace", "-w",
+        "--workspace",
+        "-w",
         help="Target workspace to import into (number, hash, or path substring from 'cursaves workspaces')",
     )
-    p_pull.add_argument("--project", "-p", help="Project path (default: current directory)")
     p_pull.add_argument(
-        "--select", "-s", action="store_true",
+        "--project", "-p", help="Project path (default: current directory)"
+    )
+    p_pull.add_argument(
+        "--select",
+        "-s",
+        action="store_true",
         help="Interactively select which snapshot projects to import",
     )
     p_pull.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Suppress the Cursor-running warning",
     )
     p_pull.add_argument(
-        "--reload", action="store_true",
+        "--reload",
+        action="store_true",
         help="(deprecated, no effect) Cursor requires a full restart to see imports",
     )
     p_pull.set_defaults(func=cmd_pull)
 
     # ── sync ──────────────────────────────────────────────────────
     p_sync = subparsers.add_parser(
-        "sync", help="Pull behind + push ahead — one command to stay in sync across machines"
+        "sync",
+        help="Pull behind + push ahead — one command to stay in sync across machines",
     )
     p_sync.set_defaults(func=cmd_sync)
 
     # ── repair ─────────────────────────────────────────────────────
     p_repair = subparsers.add_parser(
-        "repair", help="Restore missing agent blobs from snapshots (fixes 'Blob not found' errors)"
+        "repair",
+        help="Restore missing agent blobs from snapshots (fixes 'Blob not found' errors)",
     )
     p_repair.set_defaults(func=cmd_repair)
 
@@ -1836,22 +1952,31 @@ def main():
     p_reload.set_defaults(func=cmd_reload)
 
     # ── delete ─────────────────────────────────────────────────────
-    p_delete = subparsers.add_parser(
-        "delete", help="Delete cached snapshots"
-    )
-    p_delete.add_argument("--project", "-p", help="Project path (default: current directory)")
-    p_delete.add_argument("--all", action="store_true", help="Delete all snapshots for the project")
-    p_delete.add_argument("--id", help="Delete a specific snapshot by ID (supports partial match)")
+    p_delete = subparsers.add_parser("delete", help="Delete cached snapshots")
     p_delete.add_argument(
-        "--select", "-s", action="store_true",
+        "--project", "-p", help="Project path (default: current directory)"
+    )
+    p_delete.add_argument(
+        "--all", action="store_true", help="Delete all snapshots for the project"
+    )
+    p_delete.add_argument(
+        "--id", help="Delete a specific snapshot by ID (supports partial match)"
+    )
+    p_delete.add_argument(
+        "--select",
+        "-s",
+        action="store_true",
         help="Interactively select which project(s) to delete",
     )
     p_delete.add_argument(
-        "--all-projects", action="store_true",
+        "--all-projects",
+        action="store_true",
         help="Delete ALL snapshots across ALL projects",
     )
     p_delete.add_argument(
-        "--yes", "-y", action="store_true",
+        "--yes",
+        "-y",
+        action="store_true",
         help="Skip confirmation prompt",
     )
     p_delete.set_defaults(func=cmd_delete)
@@ -1861,7 +1986,8 @@ def main():
         "copy", help="Copy conversations between workspaces (same machine)"
     )
     p_copy.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Suppress the Cursor-running warning",
     )
     p_copy.set_defaults(func=cmd_copy)
@@ -1877,14 +2003,20 @@ def main():
     )
     add_project_args(p_watch)
     p_watch.add_argument(
-        "--interval", "-i", type=int, default=60,
+        "--interval",
+        "-i",
+        type=int,
+        default=60,
         help="Seconds between checks (default: 60)",
     )
     p_watch.add_argument(
-        "--no-git", action="store_true",
+        "--no-git",
+        action="store_true",
         help="Disable automatic git commit/push",
     )
-    p_watch.add_argument("--verbose", "-v", action="store_true", help="Print on every check")
+    p_watch.add_argument(
+        "--verbose", "-v", action="store_true", help="Print on every check"
+    )
     p_watch.set_defaults(func=cmd_watch)
 
     # ── doctor ─────────────────────────────────────────────────────
@@ -1892,15 +2024,19 @@ def main():
         "doctor", help="Audit chats and recover orphaned conversations"
     )
     p_doctor.add_argument(
-        "--recover", action="store_true",
+        "--recover",
+        action="store_true",
         help="Re-register orphaned chats in their workspaces",
     )
     p_doctor.add_argument(
-        "--select", "-s", action="store_true",
+        "--select",
+        "-s",
+        action="store_true",
         help="Interactively select which orphaned chats to recover",
     )
     p_doctor.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Skip the Cursor-running check (use if you can't fully quit Cursor)",
     )
     p_doctor.set_defaults(func=cmd_doctor)
@@ -1909,11 +2045,13 @@ def main():
         "migrate", help="Migrate old chats to Cursor 3.0 global index"
     )
     p_migrate.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Show what would be migrated without writing",
     )
     p_migrate.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Skip the Cursor-running check",
     )
     p_migrate.set_defaults(func=cmd_migrate)
@@ -1922,11 +2060,13 @@ def main():
         "purge", help="Delete chats from Cursor's database to reclaim space"
     )
     p_purge.add_argument(
-        "--workspace", "-w",
+        "--workspace",
+        "-w",
         help="Filter to chats from a specific workspace (name substring)",
     )
     p_purge.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Skip the Cursor-running check",
     )
     p_purge.set_defaults(func=cmd_purge)

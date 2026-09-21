@@ -8,25 +8,36 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
+
+_WIN_DRIVE_RE = re.compile(r"^/?([A-Za-z]):(/.*)?$")
 
 
 def get_cursor_user_dir() -> Path:
     """Return the Cursor User data directory for the current platform.
 
-    macOS:  ~/Library/Application Support/Cursor/User
-    Linux:  ~/.config/Cursor/User
+    macOS:   ~/Library/Application Support/Cursor/User
+    Linux:   ~/.config/Cursor/User
+    Windows: %APPDATA%/Cursor/User
     """
     system = platform.system()
     if system == "Darwin":
         base = Path.home() / "Library" / "Application Support" / "Cursor" / "User"
     elif system == "Linux":
         base = Path.home() / ".config" / "Cursor" / "User"
+    elif system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            base = Path(appdata) / "Cursor" / "User"
+        else:
+            base = Path.home() / "AppData" / "Roaming" / "Cursor" / "User"
     else:
         print(
             f"Error: Unsupported platform '{system}'.\n"
-            f"cursaves supports macOS and Linux.\n"
+            f"cursaves supports macOS, Linux, and Windows.\n"
             f"On macOS, Cursor data is at ~/Library/Application Support/Cursor/User/\n"
-            f"On Linux, Cursor data is at ~/.config/Cursor/User/",
+            f"On Linux, Cursor data is at ~/.config/Cursor/User/\n"
+            f"On Windows, Cursor data is at %APPDATA%\\Cursor\\User\\",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -62,13 +73,217 @@ def get_cursor_projects_dir() -> Path:
     return Path.home() / ".cursor" / "projects"
 
 
+def file_uri_to_path(uri: str) -> str:
+    """Decode a file:// URI to a filesystem path.
+
+    Windows Cursor stores folders as ``file:///d%3A/projects/foo``.
+    """
+    if not uri.startswith("file:"):
+        return uri.replace("%20", " ")
+    parsed = urlparse(uri)
+    path = unquote(parsed.path)
+    if _WIN_DRIVE_RE.match(path):
+        path = path.lstrip("/")
+    return path
+
+
+def path_to_file_uri(path: str) -> str:
+    """Convert a filesystem path to a file:// URI."""
+    return Path(path).expanduser().absolute().as_uri()
+
+
+def path_basename(path: str) -> str:
+    """Basename that treats both / and \\ as separators."""
+    p = path.replace("\\", "/").rstrip("/")
+    if not p:
+        return ""
+    return p.rsplit("/", 1)[-1]
+
+
+def _split_drive_prefix(prefix: str) -> tuple[Optional[str], str]:
+    """Return (drive_letter or None, posix-style absolute tail).
+
+    ``D:\\projects\\foo`` → ``('D', '/projects/foo')``
+    ``/d:/projects/foo`` → ``('d', '/projects/foo')``
+    ``/Users/foo`` → ``(None, '/Users/foo')``
+    """
+    p = prefix.strip()
+    if p.startswith("file:"):
+        p = file_uri_to_path(p)
+    p = p.replace("\\", "/")
+    m = _WIN_DRIVE_RE.match(p)
+    if m:
+        rest = m.group(2) or "/"
+        if not rest.startswith("/"):
+            rest = "/" + rest
+        return m.group(1), rest
+    if not p.startswith("/"):
+        p = "/" + p
+    return None, p
+
+
+def canonical_fs_path(path: str) -> str:
+    """Stable, comparable path string (lowercase drive, forward slashes)."""
+    drive, rest = _split_drive_prefix(path)
+    rest = "/" + rest.strip("/")
+    if rest != "/":
+        rest = rest.rstrip("/")
+    if drive:
+        return f"{drive.lower()}:{rest}"
+    return rest or "/"
+
+
+def paths_match(a: str, b: str) -> bool:
+    """True if two paths refer to the same location, ignoring slash/drive case."""
+    ca, cb = canonical_fs_path(a), canonical_fs_path(b)
+    if os.name == "nt":
+        return ca.casefold() == cb.casefold()
+    return ca == cb
+
+
+def native_fs_path(path: str) -> str:
+    """Path using this OS's separators when it is a local-style path."""
+    drive, rest = _split_drive_prefix(path)
+    if os.name == "nt" and drive:
+        return os.path.normpath(f"{drive}:{rest.replace('/', os.sep)}")
+    if drive:
+        return f"{drive.lower()}:{rest}"
+    posix = path.replace("\\", "/")
+    if os.name == "nt" and posix.startswith("/"):
+        return "/" + posix.strip("/") if posix != "/" else "/"
+    return os.path.normpath(path) if path else path
+
+
+def _path_forms(prefix: str) -> dict[str, str]:
+    """Named spellings of a project prefix (slash, backslash, file URI, …)."""
+    drive, rest = _split_drive_prefix(prefix)
+    rest = "/" + rest.strip("/")
+    if rest == "/":
+        rest = ""
+    forms: dict[str, str] = {}
+    if drive:
+        for letter in (drive.lower(), drive.upper()):
+            slash = f"{letter}:{rest}"
+            forms[f"slash_{letter}"] = slash
+            forms[f"bslash_{letter}"] = slash.replace("/", "\\")
+            forms[f"vscode_{letter}"] = f"/{letter}:{rest}"
+            forms[f"uri_{letter}"] = f"file:///{letter}:{rest}"
+            forms[f"urienc_{letter}"] = f"file:///{letter}%3A{rest}"
+    else:
+        slash = rest if rest.startswith("/") else "/" + rest
+        forms["slash"] = slash
+        forms["bslash"] = slash.replace("/", "\\")
+        forms["vscode"] = slash
+        forms["uri"] = "file://" + slash
+        forms["uri_space"] = "file://" + slash.replace(" ", "%20")
+    stripped = prefix.rstrip("/\\")
+    if stripped:
+        forms["original"] = stripped
+    return forms
+
+
+def prefix_rewrite_pairs(old_prefix: str, new_prefix: str) -> list[tuple[str, str]]:
+    """(old, new) string pairs covering Windows/POSIX/URI spellings of a prefix."""
+    if not old_prefix or not new_prefix or old_prefix == new_prefix:
+        return []
+    old_forms = _path_forms(old_prefix)
+    new_forms = _path_forms(new_prefix)
+    new_slash = (
+        new_forms.get("slash")
+        or next((v for k, v in new_forms.items() if k.startswith("slash_")), None)
+        or canonical_fs_path(new_prefix)
+    )
+    new_uri = (
+        new_forms.get("uri")
+        or next(
+            (
+                v
+                for k, v in new_forms.items()
+                if k.startswith("uri_") and "%3A" not in v
+            ),
+            None,
+        )
+        or (
+            "file://" + new_slash
+            if new_slash.startswith("/")
+            else f"file:///{new_slash}"
+        )
+    )
+
+    pairs: list[tuple[str, str]] = []
+    for key, old_v in old_forms.items():
+        if not old_v:
+            continue
+        if key.startswith("urienc") or "%3A" in old_v:
+            new_v = new_uri
+        elif key.startswith("uri") or old_v.startswith("file://"):
+            new_v = new_uri
+        elif "\\" in old_v:
+            new_v = new_slash
+        else:
+            new_v = new_slash
+        if old_v != new_v:
+            pairs.append((old_v, new_v))
+
+    seen: set[tuple[str, str]] = set()
+    ordered: list[tuple[str, str]] = []
+    for pair in sorted(pairs, key=lambda item: len(item[0]), reverse=True):
+        if pair not in seen:
+            seen.add(pair)
+            ordered.append(pair)
+    return ordered
+
+
+def rewrite_path_string(value: str, old_prefix: str, new_prefix: str) -> str:
+    """Replace project-path prefixes in a single string, including Windows variants."""
+    if not old_prefix or old_prefix == new_prefix:
+        if old_prefix and old_prefix in value:
+            return value.replace(old_prefix, new_prefix)
+        return value
+
+    result = value
+    replaced_backslash = False
+    for old_v, new_v in prefix_rewrite_pairs(old_prefix, new_prefix):
+        if old_v and old_v in result:
+            if "\\" in old_v:
+                replaced_backslash = True
+            result = result.replace(old_v, new_v)
+
+    if replaced_backslash and "\\" in result:
+        new_slash = canonical_fs_path(new_prefix)
+        if new_slash.startswith("/"):
+            result = _slashify_after_prefix(result, new_slash)
+    return result
+
+
+def _slashify_after_prefix(value: str, posix_prefix: str) -> str:
+    """Turn leftover backslashes into slashes after a POSIX prefix rewrite."""
+    if posix_prefix not in value or "\\" not in value:
+        return value
+    parts = value.split(posix_prefix)
+    out = [parts[0]]
+    for rest in parts[1:]:
+        match = re.match(r"^([^\s\"']*)(.*)$", rest, re.DOTALL)
+        if match:
+            path_part = match.group(1).replace("\\", "/")
+            out.append(posix_prefix + path_part + match.group(2))
+        else:
+            out.append(posix_prefix + rest.replace("\\", "/"))
+    return "".join(out)
+
+
 def sanitize_project_path(project_path: str) -> str:
     """Convert a project path to Cursor's sanitized directory name format.
 
     /Users/callum/Desktop/Projects/myrepo -> Users-callum-Desktop-Projects-myrepo
+    D:\\projects\\cursaves -> d-projects-cursaves
     """
-    # Strip leading slash and replace / with -
-    return project_path.strip("/").replace("/", "-")
+    p = project_path.replace("\\", "/").strip("/")
+    m = _WIN_DRIVE_RE.match(p)
+    if m:
+        rest = (m.group(2) or "").lstrip("/")
+        p = m.group(1).lower() + (("/" + rest) if rest else "")
+    return p.replace("/", "-")
 
 
 def _decode_ssh_host(host: str) -> str:
@@ -99,7 +314,6 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
     if not ws_storage.exists():
         return []
 
-    # Normalise the target path for comparison
     target = os.path.normpath(os.path.expanduser(project_path))
 
     matches = []
@@ -112,11 +326,8 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
         try:
             data = json.loads(ws_json.read_text())
             folder_uri = data.get("folder", "")
-            # Handle file:// URIs
             if folder_uri.startswith("file://"):
-                folder_path = folder_uri[len("file://") :]
-                # URL-decode common escapes
-                folder_path = folder_path.replace("%20", " ")
+                folder_path = file_uri_to_path(folder_uri)
             elif folder_uri.startswith("vscode-remote://"):
                 # SSH remote workspace - extract the path portion
                 # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -128,7 +339,7 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
             else:
                 continue
 
-            if os.path.normpath(folder_path) == target:
+            if paths_match(folder_path, target):
                 matches.append(ws_dir)
         except (json.JSONDecodeError, OSError):
             continue
@@ -192,8 +403,7 @@ def list_all_workspaces() -> list[dict]:
                 ws_uri = data["workspace"]
                 if ws_uri.startswith("file://"):
                     folder_uri = ws_uri
-                    folder_path = ws_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
+                    folder_path = file_uri_to_path(ws_uri)
                     ws_type = "workspace"
                 else:
                     continue
@@ -203,8 +413,7 @@ def list_all_workspaces() -> list[dict]:
                     continue
 
                 if folder_uri.startswith("file://"):
-                    folder_path = folder_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
+                    folder_path = file_uri_to_path(folder_uri)
                 elif folder_uri.startswith("vscode-remote://"):
                     ws_type = "ssh"
                     # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -228,14 +437,16 @@ def list_all_workspaces() -> list[dict]:
             db_path = ws_dir / "state.vscdb"
             mtime = db_path.stat().st_mtime if db_path.exists() else 0
 
-            workspaces.append({
-                "folder_uri": folder_uri,
-                "path": os.path.normpath(folder_path),
-                "type": ws_type,
-                "host": host,
-                "workspace_dir": ws_dir,
-                "mtime": mtime,
-            })
+            workspaces.append(
+                {
+                    "folder_uri": folder_uri,
+                    "path": native_fs_path(folder_path),
+                    "type": ws_type,
+                    "host": host,
+                    "workspace_dir": ws_dir,
+                    "mtime": mtime,
+                }
+            )
         except (json.JSONDecodeError, OSError):
             continue
 
@@ -444,6 +655,7 @@ def is_sync_repo_initialized() -> bool:
     if config_path.exists():
         try:
             import json
+
             cfg = json.loads(config_path.read_text())
             return cfg.get("backend") in ("s3", "azure")
         except Exception:
@@ -472,17 +684,16 @@ def find_all_matching_workspaces(source_path: str) -> list[dict]:
     sorted by match quality (exact matches first) then by mtime.
     """
     all_ws = list_all_workspaces()
-    source_normalized = os.path.normpath(source_path)
-    source_basename = os.path.basename(source_normalized)
+    source_basename = path_basename(source_path)
 
     exact_matches = []
     basename_matches = []
 
     for ws in all_ws:
         ws_path = ws["path"]
-        ws_basename = os.path.basename(ws_path)
+        ws_basename = path_basename(ws_path)
 
-        if ws_path == source_normalized:
+        if paths_match(ws_path, source_path):
             exact_matches.append(ws)
         elif ws_basename == source_basename:
             basename_matches.append(ws)
@@ -537,7 +748,7 @@ def get_project_identifier(project_path: str) -> str:
     remote_url = _get_git_remote_url(project_path)
     if remote_url:
         return _normalize_remote_url(remote_url)
-    return os.path.basename(os.path.normpath(project_path))
+    return path_basename(project_path)
 
 
 def _get_git_remote_url(project_path: str) -> Optional[str]:

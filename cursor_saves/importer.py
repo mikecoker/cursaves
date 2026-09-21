@@ -52,7 +52,11 @@ def list_snapshot_files(directory: Path) -> list[Path]:
         files.add(base)
 
     # Remove individual shard files from the set (they're represented by the base)
-    files = {f for f in files if not (f.suffix.lstrip(".").isdigit() and ".json.gz." in f.name)}
+    files = {
+        f
+        for f in files
+        if not (f.suffix.lstrip(".").isdigit() and ".json.gz." in f.name)
+    }
 
     return sorted(files)
 
@@ -109,6 +113,8 @@ def is_cursor_running() -> bool:
     Cursor executable while excluding helpers, crash handlers, and the
     macOS CursorUIViewService system process.
     """
+    if sys.platform == "win32":
+        return _is_cursor_running_windows()
     try:
         result = subprocess.run(
             ["ps", "-axo", "args"],
@@ -118,13 +124,49 @@ def is_cursor_running() -> bool:
         if result.returncode != 0:
             return False
         for line in result.stdout.splitlines():
-            if "Cursor.app/Contents/MacOS/Cursor" in line \
-                    and "Helper" not in line \
-                    and "Frameworks" not in line:
+            if (
+                "Cursor.app/Contents/MacOS/Cursor" in line
+                and "Helper" not in line
+                and "Frameworks" not in line
+            ):
                 return True
         return False
     except FileNotFoundError:
         return False
+
+
+def _is_cursor_running_windows() -> bool:
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=flags,
+        )
+        if result.returncode != 0:
+            return False
+        return "Cursor.exe" in (result.stdout or "")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _cursor_close_hint() -> str:
+    if sys.platform == "win32":
+        return "Close Cursor FIRST (Alt+F4 or File > Exit)"
+    if sys.platform == "darwin":
+        return "Close Cursor FIRST (Cmd+Q / quit)"
+    return "Close Cursor FIRST (quit the application)"
+
+
+def _warn_cursor_running() -> None:
+    print(
+        f"WARNING: Cursor is running. {_cursor_close_hint()},\n"
+        "then run this command, then reopen Cursor.\n"
+        "Use --force to override (not recommended).\n",
+        file=sys.stderr,
+    )
 
 
 _SKIP_REWRITE_KEYS = frozenset({"conversationState"})
@@ -134,17 +176,20 @@ def rewrite_paths(data: Any, old_prefix: str, new_prefix: str) -> Any:
     """Recursively rewrite absolute paths in conversation data.
 
     Replaces old_prefix with new_prefix in all string values that
-    look like file paths.  Skips binary/encoded fields like
+    look like file paths, including Windows drive-letter, backslash,
+    and file:// URI spellings.  Skips binary/encoded fields like
     ``conversationState`` (base64-encoded protobuf) that should
     never be modified.
     """
     if isinstance(data, str):
-        if old_prefix in data:
-            return data.replace(old_prefix, new_prefix)
-        return data
+        return paths.rewrite_path_string(data, old_prefix, new_prefix)
     elif isinstance(data, dict):
         return {
-            k: (v if k in _SKIP_REWRITE_KEYS else rewrite_paths(v, old_prefix, new_prefix))
+            k: (
+                v
+                if k in _SKIP_REWRITE_KEYS
+                else rewrite_paths(v, old_prefix, new_prefix)
+            )
             for k, v in data.items()
         }
     elif isinstance(data, list):
@@ -170,7 +215,7 @@ def find_or_create_workspace(project_path: str) -> Path:
     ws_dir.mkdir(parents=True, exist_ok=True)
 
     # Create workspace.json
-    folder_uri = "file://" + os.path.normpath(project_path)
+    folder_uri = paths.path_to_file_uri(os.path.normpath(project_path))
     ws_json = ws_dir / "workspace.json"
     ws_json.write_text(json.dumps({"folder": folder_uri}))
 
@@ -186,7 +231,9 @@ def _init_workspace_db(db_path: Path):
 
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE, value BLOB)")
-    conn.execute("CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT UNIQUE, value BLOB)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT UNIQUE, value BLOB)"
+    )
     conn.commit()
     conn.close()
 
@@ -234,7 +281,8 @@ def _check_conflict(
     local_header_ids = set()
     if local_data:
         local_header_ids = {
-            h.get("bubbleId") for h in local_data.get("fullConversationHeadersOnly", [])
+            h.get("bubbleId")
+            for h in local_data.get("fullConversationHeadersOnly", [])
             if h.get("bubbleId")
         }
     incoming_only_headers = set()
@@ -279,12 +327,18 @@ def import_snapshot(
         return False
 
     if snapshot.get("version") not in (1, 2, 3):
-        print(f"Error: Unsupported snapshot version: {snapshot.get('version')}", file=sys.stderr)
+        print(
+            f"Error: Unsupported snapshot version: {snapshot.get('version')}",
+            file=sys.stderr,
+        )
         return False
 
     composer_id = snapshot["composerId"]
     source_path = snapshot.get("sourceProjectPath", "")
     target_path = os.path.normpath(target_project_path)
+    needs_rewrite = bool(source_path) and not paths.paths_match(
+        source_path, target_path
+    )
 
     composer_data = snapshot["composerData"]
 
@@ -295,7 +349,7 @@ def import_snapshot(
         return True  # Not an error, just nothing to import
 
     # Rewrite paths if the project is at a different location
-    if source_path and source_path != target_path:
+    if needs_rewrite:
         print(f"  Rewriting paths: {source_path} -> {target_path}")
         composer_data = rewrite_paths(composer_data, source_path, target_path)
 
@@ -308,14 +362,17 @@ def import_snapshot(
     # ── Conflict check ──────────────────────────────────────────────
     global_db_path = paths.get_global_db_path()
     incoming_bubble_ids = set(bubble_entries.keys())
-    incoming_header_ids = {
-        h.get("bubbleId") for h in headers if h.get("bubbleId")
-    }
+    incoming_header_ids = {h.get("bubbleId") for h in headers if h.get("bubbleId")}
     conflict = _check_conflict(
-        global_db_path, composer_id, incoming_bubble_ids, incoming_header_ids,
+        global_db_path,
+        composer_id,
+        incoming_bubble_ids,
+        incoming_header_ids,
     )
     chat_name = composer_data.get("name", "Untitled")
-    source_label = snapshot.get("sourceHost") or snapshot.get("sourceMachine") or "remote"
+    source_label = (
+        snapshot.get("sourceHost") or snapshot.get("sourceMachine") or "remote"
+    )
 
     if conflict == "local_ahead":
         with db.CursorDB(global_db_path) as cdb:
@@ -323,17 +380,17 @@ def import_snapshot(
         local_count = len((ld or {}).get("fullConversationHeadersOnly", []))
         snap_count = len(headers)
         print(
-            f"  Skipped: \"{chat_name}\" — local has {local_count} msgs, "
+            f'  Skipped: "{chat_name}" — local has {local_count} msgs, '
             f"snapshot has {snap_count} (local is newer, nothing to import)"
         )
         return True
 
     if conflict == "identical":
-        print(f"  Skipped: \"{chat_name}\" — already up to date ({len(headers)} msgs)")
+        print(f'  Skipped: "{chat_name}" — already up to date ({len(headers)} msgs)')
         return True
 
     if conflict == "new":
-        print(f"  New chat: \"{chat_name}\" ({len(headers)} msgs from {source_label})")
+        print(f'  New chat: "{chat_name}" ({len(headers)} msgs from {source_label})')
 
     if conflict == "incoming_newer":
         with db.CursorDB(global_db_path) as cdb:
@@ -341,7 +398,7 @@ def import_snapshot(
         local_count = len((ld or {}).get("fullConversationHeadersOnly", []))
         snap_count = len(headers)
         print(
-            f"  Updating: \"{chat_name}\" — local has {local_count} msgs, "
+            f'  Updating: "{chat_name}" — local has {local_count} msgs, '
             f"snapshot has {snap_count} from {source_label}"
         )
 
@@ -355,11 +412,9 @@ def import_snapshot(
         composer_data["name"] = new_name
         composer_id = new_id
         print(
-            f"  Diverged: \"{chat_name}\" — local and {source_label} both have unique messages"
+            f'  Diverged: "{chat_name}" — local and {source_label} both have unique messages'
         )
-        print(
-            f"            Importing as separate chat: \"{new_name}\""
-        )
+        print(f'            Importing as separate chat: "{new_name}"')
 
     # ── Step 1: Backup global DB ────────────────────────────────────
     if not skip_backup and global_db_path.exists():
@@ -380,42 +435,56 @@ def import_snapshot(
 
         # Write message contexts (batch)
         if message_contexts:
-            global_cdb.write_json_batch([
-                (f"messageRequestContext:{composer_id}:{msg_key}", context)
-                for msg_key, context in message_contexts.items()
-            ])
+            if needs_rewrite:
+                message_contexts = {
+                    msg_key: rewrite_paths(context, source_path, target_path)
+                    for msg_key, context in message_contexts.items()
+                }
+            global_cdb.write_json_batch(
+                [
+                    (f"messageRequestContext:{composer_id}:{msg_key}", context)
+                    for msg_key, context in message_contexts.items()
+                ]
+            )
 
         # Write bubble entries in a single transaction (can be 50K+ entries)
         if bubble_entries:
-            if source_path and source_path != target_path:
+            if needs_rewrite:
                 bubble_entries = {
                     bid: rewrite_paths(bdata, source_path, target_path)
                     for bid, bdata in bubble_entries.items()
                 }
-            global_cdb.write_json_batch([
-                (f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
-                for bubble_id, bubble_data in bubble_entries.items()
-            ])
+            global_cdb.write_json_batch(
+                [
+                    (f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
+                    for bubble_id, bubble_data in bubble_entries.items()
+                ]
+            )
 
         # Write checkpoint data (workspace state snapshots for agent continuation)
         if checkpoints:
-            if source_path and source_path != target_path:
+            if needs_rewrite:
                 checkpoints = {
                     cp_id: rewrite_paths(cp_data, source_path, target_path)
                     for cp_id, cp_data in checkpoints.items()
                 }
-            global_cdb.write_json_batch([
-                (f"checkpointId:{composer_id}:{cp_id}", cp_data)
-                for cp_id, cp_data in checkpoints.items()
-            ])
+            global_cdb.write_json_batch(
+                [
+                    (f"checkpointId:{composer_id}:{cp_id}", cp_data)
+                    for cp_id, cp_data in checkpoints.items()
+                ]
+            )
 
         # Write agent state blobs (encrypted context for conversation continuation)
         if agent_blobs:
             import base64
-            global_cdb.write_batch([
-                (f"agentKv:blob:{bid}", base64.b64decode(bdata))
-                for bid, bdata in agent_blobs.items()
-            ])
+
+            global_cdb.write_batch(
+                [
+                    (f"agentKv:blob:{bid}", base64.b64decode(bdata))
+                    for bid, bdata in agent_blobs.items()
+                ]
+            )
     finally:
         global_cdb.close()
 
@@ -437,25 +506,35 @@ def import_snapshot(
     try:
         written = verify_cdb.get_json(f"composerData:{composer_id}")
         if not written:
-            print("  WARNING: composerData not found in global DB after write!", file=sys.stderr)
+            print(
+                "  WARNING: composerData not found in global DB after write!",
+                file=sys.stderr,
+            )
             return False
         if bubble_entries:
             sample_key = next(iter(bubble_entries))
             sample = verify_cdb.get_json(f"bubbleId:{composer_id}:{sample_key}")
             if not sample:
-                print("  WARNING: bubble entries not found in global DB after write!", file=sys.stderr)
+                print(
+                    "  WARNING: bubble entries not found in global DB after write!",
+                    file=sys.stderr,
+                )
                 return False
 
         final_name = composer_data.get("name", chat_name)
         final_msgs = len(written.get("fullConversationHeadersOnly", []))
         if conflict == "new":
-            print(f"  Imported: \"{final_name}\" ({final_msgs} msgs, {len(bubble_entries)} bubbles)")
+            print(
+                f'  Imported: "{final_name}" ({final_msgs} msgs, {len(bubble_entries)} bubbles)'
+            )
         elif conflict == "diverged":
-            print(f"  Copied: \"{final_name}\" ({final_msgs} msgs) — original \"{chat_name}\" left unchanged")
+            print(
+                f'  Copied: "{final_name}" ({final_msgs} msgs) — original "{chat_name}" left unchanged'
+            )
         elif conflict == "incoming_newer":
-            print(f"  Updated: \"{final_name}\" → {final_msgs} msgs")
+            print(f'  Updated: "{final_name}" → {final_msgs} msgs')
         else:
-            print(f"  Done: \"{final_name}\" ({final_msgs} msgs)")
+            print(f'  Done: "{final_name}" ({final_msgs} msgs)')
     finally:
         verify_cdb.close()
 
@@ -603,14 +682,16 @@ def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
             if exported_at and (latest_export is None or exported_at > latest_export):
                 latest_export = exported_at
 
-        projects.append({
-            "name": project_dir.name,
-            "path": project_dir,
-            "count": len(snapshot_files),
-            "source_paths": source_paths,
-            "sources": source_machines,
-            "latest_export": latest_export,
-        })
+        projects.append(
+            {
+                "name": project_dir.name,
+                "path": project_dir,
+                "count": len(snapshot_files),
+                "source_paths": source_paths,
+                "sources": source_machines,
+                "latest_export": latest_export,
+            }
+        )
 
     return projects
 
@@ -638,23 +719,31 @@ def find_snapshot_dir_for_project(
         return exact
 
     # 2. Basename match (covers SSH workspace push → local pull)
-    basename = os.path.basename(os.path.normpath(target_project_path))
+    basename = paths.path_basename(target_project_path)
     basename_dir = snapshots_dir / basename
-    if basename_dir.exists() and basename_dir != exact and list_snapshot_files(basename_dir):
+    if (
+        basename_dir.exists()
+        and basename_dir != exact
+        and list_snapshot_files(basename_dir)
+    ):
         return basename_dir
 
     # 3. Scan snapshot dirs for matching source path basenames
     # This handles the case where the project was pushed from a different
     # machine with a different directory structure but same repo
     for project_dir in snapshots_dir.iterdir():
-        if not project_dir.is_dir() or project_dir == exact or project_dir == basename_dir:
+        if (
+            not project_dir.is_dir()
+            or project_dir == exact
+            or project_dir == basename_dir
+        ):
             continue
         # Check first snapshot file for a matching source path basename
         for sf in list_snapshot_files(project_dir):
             try:
                 data = read_snapshot_file(sf)
                 source_path = data.get("sourceProjectPath", "")
-                if source_path and os.path.basename(os.path.normpath(source_path)) == basename:
+                if source_path and paths.path_basename(source_path) == basename:
                     return project_dir
             except (json.JSONDecodeError, OSError, gzip.BadGzipFile):
                 pass
@@ -680,14 +769,7 @@ def import_from_snapshot_dir(
     Returns (success_count, failure_count).
     """
     if not force and is_cursor_running():
-        print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
-            "then import, then reopen Cursor. If you import while Cursor is\n"
-            "running, Cursor will overwrite the sidebar registration on exit\n"
-            "and the imported chats will disappear.\n"
-            "Use --force to import anyway (not recommended).\n",
-            file=sys.stderr,
-        )
+        _warn_cursor_running()
         return 0, 0
 
     snapshot_files = list_snapshot_files(snapshot_dir)
@@ -741,25 +823,23 @@ def import_all_snapshots(
     Returns (success_count, failure_count).
     """
     if not force and is_cursor_running():
-        print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
-            "then import, then reopen Cursor. If you import while Cursor is\n"
-            "running, Cursor will overwrite the sidebar registration on exit\n"
-            "and the imported chats will disappear.\n"
-            "Use --force to import anyway (not recommended).\n",
-            file=sys.stderr,
-        )
+        _warn_cursor_running()
         return 0, 0
 
     if snapshots_dir is None:
         snapshots_dir = paths.get_snapshots_dir()
 
-    project_snapshots = find_snapshot_dir_for_project(target_project_path, snapshots_dir)
+    project_snapshots = find_snapshot_dir_for_project(
+        target_project_path, snapshots_dir
+    )
 
     if not project_snapshots:
         project_id = paths.get_project_identifier(target_project_path)
         print(f"No snapshots found for project '{project_id}'", file=sys.stderr)
-        print(f"Run 'cursaves snapshots' to see available snapshot projects.", file=sys.stderr)
+        print(
+            f"Run 'cursaves snapshots' to see available snapshot projects.",
+            file=sys.stderr,
+        )
         return 0, 0
 
     project_id = paths.get_project_identifier(target_project_path)
@@ -771,7 +851,9 @@ def import_all_snapshots(
         )
 
     return import_from_snapshot_dir(
-        project_snapshots, target_project_path, force=force,
+        project_snapshots,
+        target_project_path,
+        force=force,
         target_workspace_dir=target_workspace_dir,
     )
 
@@ -785,7 +867,9 @@ def _build_composer_header_entry(composer_id: str, composer_data: dict) -> dict:
     return {
         "type": "head",
         "composerId": composer_id,
-        "lastUpdatedAt": composer_data.get("lastUpdatedAt", composer_data.get("createdAt", 0)),
+        "lastUpdatedAt": composer_data.get(
+            "lastUpdatedAt", composer_data.get("createdAt", 0)
+        ),
         "createdAt": composer_data.get("createdAt", 0),
         "unifiedMode": composer_data.get("unifiedMode", "agent"),
         "forceMode": composer_data.get("forceMode", ""),
@@ -812,6 +896,7 @@ def _build_workspace_identifier(ws_dir: Path) -> dict:
     identifier format used by Cursor 3.0's composer.composerHeaders.
     """
     import json as _json
+
     ws_json = ws_dir / "workspace.json"
     ws_hash = ws_dir.name
     if not ws_json.exists():
@@ -828,9 +913,12 @@ def _build_workspace_identifier(ws_dir: Path) -> dict:
 
     uri_obj: dict = {"$mid": 1}
     if folder_uri.startswith("file://"):
-        fs_path = folder_uri[len("file://"):].replace("%20", " ")
+        fs_path = paths.native_fs_path(paths.file_uri_to_path(folder_uri))
+        posix = fs_path.replace("\\", "/")
+        if not posix.startswith("/"):
+            posix = "/" + posix
         uri_obj["fsPath"] = fs_path
-        uri_obj["path"] = fs_path
+        uri_obj["path"] = posix
         uri_obj["external"] = folder_uri
         uri_obj["scheme"] = "file"
     elif folder_uri.startswith("vscode-remote://"):
@@ -873,7 +961,9 @@ def _register_in_global_headers(
             entry["workspaceIdentifier"] = _build_workspace_identifier(ws_dir)
             all_composers.append(entry)
             headers["allComposers"] = all_composers
-            global_cdb.write_json("composer.composerHeaders", headers, table="ItemTable")
+            global_cdb.write_json(
+                "composer.composerHeaders", headers, table="ItemTable"
+            )
             paths.invalidate_headers_cache()
     finally:
         global_cdb.close()
@@ -953,12 +1043,7 @@ def copy_between_workspaces(
     Returns (success_count, failure_count).
     """
     if not force and is_cursor_running():
-        print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
-            "then run this command, then reopen Cursor.\n"
-            "Use --force to override (not recommended).\n",
-            file=sys.stderr,
-        )
+        _warn_cursor_running()
         return 0, 0
 
     global_db_path = paths.get_global_db_path()
@@ -996,7 +1081,7 @@ def copy_between_workspaces(
             # Check for same-name conflict in target
             existing_same_name = [n for n in target_names.values() if n == name]
             if existing_same_name:
-                print(f"  Note: target already has a chat named \"{name}\"")
+                print(f'  Note: target already has a chat named "{name}"')
 
             # Deep copy: new ID, rewrite paths, duplicate all data
             new_id = str(uuid.uuid4())
@@ -1013,7 +1098,7 @@ def copy_between_workspaces(
             if bubble_keys:
                 bubble_items = []
                 for key in bubble_keys:
-                    bubble_id = key[len(f"bubbleId:{old_id}:"):]
+                    bubble_id = key[len(f"bubbleId:{old_id}:") :]
                     val = read_cdb.get_json(key)
                     if val:
                         if needs_rewrite:
@@ -1027,10 +1112,12 @@ def copy_between_workspaces(
             if ctx_keys:
                 ctx_items = []
                 for key in ctx_keys:
-                    msg_key = key[len(f"messageRequestContext:{old_id}:"):]
+                    msg_key = key[len(f"messageRequestContext:{old_id}:") :]
                     val = read_cdb.get_json(key)
                     if val:
-                        ctx_items.append((f"messageRequestContext:{new_id}:{msg_key}", val))
+                        ctx_items.append(
+                            (f"messageRequestContext:{new_id}:{msg_key}", val)
+                        )
                 if ctx_items:
                     write_cdb.write_json_batch(ctx_items)
 
@@ -1039,7 +1126,7 @@ def copy_between_workspaces(
             if cp_keys:
                 cp_items = []
                 for key in cp_keys:
-                    cp_id = key[len(f"checkpointId:{old_id}:"):]
+                    cp_id = key[len(f"checkpointId:{old_id}:") :]
                     val = read_cdb.get_json(key)
                     if val:
                         if needs_rewrite:
@@ -1118,7 +1205,9 @@ def repair_missing_blobs(verbose: bool = False) -> tuple[int, int]:
         all_missing_ids |= s
 
     if verbose:
-        print(f"  {len(missing_map)} conversation(s) with {len(all_missing_ids)} unique missing blob(s)")
+        print(
+            f"  {len(missing_map)} conversation(s) with {len(all_missing_ids)} unique missing blob(s)"
+        )
 
     # Phase 2: Scan snapshots that contain agentBlobs (version >= 3).
     # Only decompress snapshots that might contain the missing blobs.
@@ -1166,7 +1255,9 @@ def repair_missing_blobs(verbose: bool = False) -> tuple[int, int]:
     if not restored_blobs:
         if verbose:
             still_missing = len(all_missing_ids)
-            print(f"  No matching blobs found in snapshots ({still_missing} still missing)")
+            print(
+                f"  No matching blobs found in snapshots ({still_missing} still missing)"
+            )
         return 0, 0
 
     # Phase 3: Write restored blobs to the global DB
@@ -1175,10 +1266,9 @@ def repair_missing_blobs(verbose: bool = False) -> tuple[int, int]:
         print(f"  Backed up global DB to {backup_path.name}")
 
     with db.CursorDB(global_db_path) as cdb:
-        cdb.write_batch([
-            (f"agentKv:blob:{bid}", val)
-            for bid, val in restored_blobs.items()
-        ])
+        cdb.write_batch(
+            [(f"agentKv:blob:{bid}", val) for bid, val in restored_blobs.items()]
+        )
 
     conversations_fixed = 0
     for cid, missing in missing_map.items():
@@ -1187,7 +1277,9 @@ def repair_missing_blobs(verbose: bool = False) -> tuple[int, int]:
 
     remaining = len(all_missing_ids) - len(restored_blobs)
     if verbose and remaining > 0:
-        print(f"  {remaining} blob(s) not found in any snapshot (from conversations not yet pushed)")
+        print(
+            f"  {remaining} blob(s) not found in any snapshot (from conversations not yet pushed)"
+        )
 
     return conversations_fixed, len(restored_blobs)
 
@@ -1216,9 +1308,11 @@ def doctor_audit() -> dict:
     wal_path = global_db_path.parent / (global_db_path.name + "-wal")
     if wal_path.exists():
         storage["wal_mb"] = wal_path.stat().st_size / (1024 * 1024)
-    ws_total = sum(
-        f.stat().st_size for f in ws_storage.rglob("*") if f.is_file()
-    ) if ws_storage.exists() else 0
+    ws_total = (
+        sum(f.stat().st_size for f in ws_storage.rglob("*") if f.is_file())
+        if ws_storage.exists()
+        else 0
+    )
     storage["workspace_storage_mb"] = ws_total / (1024 * 1024)
 
     # --- Build registration map from all workspaces ---
@@ -1241,21 +1335,25 @@ def doctor_audit() -> dict:
         if ws["host"]:
             ws_label += f" ({ws['host']})"
 
-        workspace_summaries.append({
-            "label": ws_label,
-            "path": ws["path"],
-            "host": ws.get("host"),
-            "workspace_dir": ws["workspace_dir"],
-            "chat_count": len(ws_composer_ids),
-        })
+        workspace_summaries.append(
+            {
+                "label": ws_label,
+                "path": ws["path"],
+                "host": ws.get("host"),
+                "workspace_dir": ws["workspace_dir"],
+                "chat_count": len(ws_composer_ids),
+            }
+        )
 
         for cid in ws_composer_ids:
             if cid not in registered_ids:
                 registered_ids[cid] = []
-            registered_ids[cid].append({
-                "label": ws_label,
-                "workspace_dir": ws["workspace_dir"],
-            })
+            registered_ids[cid].append(
+                {
+                    "label": ws_label,
+                    "workspace_dir": ws["workspace_dir"],
+                }
+            )
 
     # --- Build workspace-by-path map for orphan matching ---
     ws_by_path: dict[str, list[dict]] = {}
@@ -1293,14 +1391,16 @@ def doctor_audit() -> dict:
                     if best_ws.get("host"):
                         ws_label += f" ({best_ws['host']})"
 
-                orphaned.append({
-                    "composerId": cid,
-                    "name": name or "Untitled",
-                    "messageCount": msgs,
-                    "createdAt": cd.get("createdAt", 0),
-                    "lastUpdatedAt": cd.get("lastUpdatedAt", 0),
-                    "likelyWorkspace": ws_label,
-                })
+                orphaned.append(
+                    {
+                        "composerId": cid,
+                        "name": name or "Untitled",
+                        "messageCount": msgs,
+                        "createdAt": cd.get("createdAt", 0),
+                        "lastUpdatedAt": cd.get("lastUpdatedAt", 0),
+                        "likelyWorkspace": ws_label,
+                    }
+                )
 
     orphaned.sort(key=lambda x: x["messageCount"], reverse=True)
 
@@ -1331,12 +1431,7 @@ def doctor_recover(
     Returns (recovered, failed).
     """
     if not force and is_cursor_running():
-        print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
-            "then run this command, then reopen Cursor.\n"
-            "Use --force to override (not recommended).\n",
-            file=sys.stderr,
-        )
+        _warn_cursor_running()
         return 0, 0
 
     global_db_path = paths.get_global_db_path()
@@ -1375,7 +1470,7 @@ def doctor_recover(
             target_ws = _find_best_workspace(cid, cd, cdb, ws_by_path)
 
             if not target_ws:
-                print(f"  No workspace found for: \"{name}\" ({cid[:12]}...)")
+                print(f'  No workspace found for: "{name}" ({cid[:12]}...)')
                 failed += 1
                 continue
 
@@ -1385,10 +1480,10 @@ def doctor_recover(
                 ws_label += f" ({target_ws['host']})"
 
             if _register_in_workspace(cid, cd, ws_dir):
-                print(f"  Recovered: \"{name}\" → {ws_label}")
+                print(f'  Recovered: "{name}" → {ws_label}')
                 recovered += 1
             else:
-                print(f"  Failed: \"{name}\"")
+                print(f'  Failed: "{name}"')
                 failed += 1
 
     return recovered, failed
@@ -1469,12 +1564,7 @@ def migrate_to_global_headers(
     Returns (migrated_count, already_present_count).
     """
     if not dry_run and not force and is_cursor_running():
-        print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
-            "then run this command, then reopen Cursor.\n"
-            "Use --force to override (not recommended).\n",
-            file=sys.stderr,
-        )
+        _warn_cursor_running()
         return 0, 0
 
     global_db_path = paths.get_global_db_path()
@@ -1491,9 +1581,7 @@ def migrate_to_global_headers(
     if headers is None:
         headers = {"allComposers": []}
 
-    existing_ids = {
-        c.get("composerId") for c in headers.get("allComposers", [])
-    }
+    existing_ids = {c.get("composerId") for c in headers.get("allComposers", [])}
 
     # Scan all workspaces for chats not in the global index
     all_ws = paths.list_all_workspaces()
@@ -1579,7 +1667,7 @@ def migrate_to_global_headers(
             name = entry.get("name", "")[:40] or "(unnamed)"
 
             if dry_run:
-                print(f"  Would migrate: {cid[:12]}... \"{name}\" → {ws_label}")
+                print(f'  Would migrate: {cid[:12]}... "{name}" → {ws_label}')
 
             final_entries.append(entry)
 
@@ -1588,8 +1676,10 @@ def migrate_to_global_headers(
         return 0, already_present
 
     if dry_run:
-        print(f"\n{len(final_entries)} chat(s) would be migrated "
-              f"({already_present} already present).")
+        print(
+            f"\n{len(final_entries)} chat(s) would be migrated "
+            f"({already_present} already present)."
+        )
         return len(final_entries), already_present
 
     backup_path = db.backup_db(global_db_path)
@@ -1690,16 +1780,18 @@ def list_all_chats_with_sizes() -> list[dict]:
             checkpoint_count = checkpoint_counts.get(cid, 0)
             key_count = 1 + bubble_count + checkpoint_count
 
-            results.append({
-                "composerId": cid,
-                "name": name,
-                "messageCount": msgs,
-                "keyCount": key_count,
-                "bubbleCount": bubble_count,
-                "checkpointCount": checkpoint_count,
-                "workspace_label": cid_to_ws.get(cid, "unknown"),
-                "workspace_dir": cid_to_ws_dir.get(cid, ""),
-            })
+            results.append(
+                {
+                    "composerId": cid,
+                    "name": name,
+                    "messageCount": msgs,
+                    "keyCount": key_count,
+                    "bubbleCount": bubble_count,
+                    "checkpointCount": checkpoint_count,
+                    "workspace_label": cid_to_ws.get(cid, "unknown"),
+                    "workspace_dir": cid_to_ws_dir.get(cid, ""),
+                }
+            )
 
     results.sort(key=lambda x: x["keyCount"], reverse=True)
     return results
@@ -1722,12 +1814,7 @@ def purge_chats(
     Returns (deleted_count, keys_removed).
     """
     if not force and is_cursor_running():
-        print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
-            "then run this command, then reopen Cursor.\n"
-            "Use --force to override (not recommended).\n",
-            file=sys.stderr,
-        )
+        _warn_cursor_running()
         return 0, 0
 
     if not composer_ids:
@@ -1751,7 +1838,9 @@ def purge_chats(
             keys_deleted += write_cdb.delete_keys([f"composerData:{cid}"])
             keys_deleted += write_cdb.delete_keys_by_prefix(f"bubbleId:{cid}:")
             keys_deleted += write_cdb.delete_keys_by_prefix(f"checkpointId:{cid}:")
-            keys_deleted += write_cdb.delete_keys_by_prefix(f"messageRequestContext:{cid}:")
+            keys_deleted += write_cdb.delete_keys_by_prefix(
+                f"messageRequestContext:{cid}:"
+            )
             total_keys += keys_deleted
 
         # Remove from composer.composerHeaders (global DB, ItemTable)
@@ -1759,8 +1848,7 @@ def purge_chats(
         if headers and "allComposers" in headers:
             before = len(headers["allComposers"])
             headers["allComposers"] = [
-                c for c in headers["allComposers"]
-                if c.get("composerId") not in cid_set
+                c for c in headers["allComposers"] if c.get("composerId") not in cid_set
             ]
             if len(headers["allComposers"]) < before:
                 write_cdb.write_json(
@@ -1787,7 +1875,8 @@ def purge_chats(
                 if "allComposers" in data:
                     before = len(data["allComposers"])
                     data["allComposers"] = [
-                        c for c in data["allComposers"]
+                        c
+                        for c in data["allComposers"]
                         if c.get("composerId") not in cid_set
                     ]
                     if len(data["allComposers"]) < before:
@@ -1796,16 +1885,12 @@ def purge_chats(
                 for list_key in ("selectedComposerIds", "lastFocusedComposerIds"):
                     if list_key in data:
                         before = len(data[list_key])
-                        data[list_key] = [
-                            c for c in data[list_key] if c not in cid_set
-                        ]
+                        data[list_key] = [c for c in data[list_key] if c not in cid_set]
                         if len(data[list_key]) < before:
                             changed = True
 
                 if changed:
-                    ws_cdb.write_json(
-                        "composer.composerData", data, table="ItemTable"
-                    )
+                    ws_cdb.write_json("composer.composerData", data, table="ItemTable")
             finally:
                 ws_cdb.close()
         except Exception:
