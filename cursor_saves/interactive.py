@@ -69,9 +69,7 @@ def select_many(
     for c in choices:
         display = c.get(name_key, str(c))
         val = c if value_key is None else c.get(value_key)
-        inq_choices.append(
-            Choice(value=val, name=display, enabled=default_all)
-        )
+        inq_choices.append(Choice(value=val, name=display, enabled=default_all))
 
     try:
         result = inquirer.fuzzy(
@@ -117,10 +115,12 @@ def select_workspace(workspaces: list[dict]) -> dict | None:
         host = ws.get("host", "")
         convos = ws.get("conversations", 0)
         label = f"{name} ({host})" if host else name
-        choices.append({
-            "name": f"{label:<40} {convos:>3} chats",
-            "_ws": ws,
-        })
+        choices.append(
+            {
+                "name": f"{label:<40} {convos:>3} chats",
+                "_ws": ws,
+            }
+        )
 
     selected = select_one(choices, message="Select workspace:", name_key="name")
     if selected is None:
@@ -132,10 +132,10 @@ def select_conversations(
     conversations: list[dict],
     action: str = "push",
 ) -> list[str]:
-    """Multi-select conversations using checkboxes.
+    """Single-select a conversation using fuzzy search.
 
     Each conversation dict should have 'id', 'name', 'messageCount'.
-    Returns list of selected composer IDs.
+    Returns a one-element list of the selected composer ID, or empty.
     """
     if not conversations:
         return []
@@ -146,21 +146,22 @@ def select_conversations(
         msgs = c.get("messageCount", 0)
         last = (c.get("lastUpdated", "") or "")[:16]
         display = f"{name:<38} {msgs:>4} msgs  {last}"
-        choices.append({
-            "name": display,
-            "composerId": c["id"],
-        })
+        choices.append(
+            {
+                "name": display,
+                "composerId": c["id"],
+            }
+        )
 
-    selected = select_many(
+    selected = select_one(
         choices,
-        message=f"Select chats to {action} (space=toggle, type to filter):",
+        message=f"Select a chat to {action} (type to filter, enter to confirm):",
         name_key="name",
-        default_all=True,
     )
 
     if not selected:
         return []
-    return [s["composerId"] for s in selected]
+    return [selected["composerId"]]
 
 
 def select_purge_chats(
@@ -192,10 +193,12 @@ def select_purge_chats(
         if len(ws) > 18:
             ws = ws[:15] + "..."
         display = f"{ws:<18} │ {name:<32} {msgs:>4} msgs  {keys:>5} keys"
-        choices.append({
-            "name": display,
-            "composerId": c["composerId"],
-        })
+        choices.append(
+            {
+                "name": display,
+                "composerId": c["composerId"],
+            }
+        )
 
     selected = select_many(
         choices,
@@ -229,16 +232,18 @@ def select_snapshots(
         if len(source) > 14:
             source = source[:11] + "..."
         display = f"{name:<36} {msgs:>4} msgs  from {source}"
-        choices.append({
-            "name": display,
-            "_snapshot": s,
-        })
+        choices.append(
+            {
+                "name": display,
+                "_snapshot": s,
+            }
+        )
 
     selected = select_many(
         choices,
-        message="Select chats to import (space=toggle, type to filter):",
+        message="Select chats to import (none selected; space=toggle, type to filter):",
         name_key="name",
-        default_all=True,
+        default_all=False,
     )
 
     if not selected:

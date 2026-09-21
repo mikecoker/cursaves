@@ -800,7 +800,7 @@ def _push_ahead(
             ws_label = ws_label[:27] + "..."
         print(f"  {i:<4} {name:<36} {ws_label}")
 
-    print(f"\n  Push these? (e.g. 1,3,5 or 1-3 or 'all') [all]:")
+    print(f"\n  Push which? (e.g. 1 or 1,3,5 or 1-3 or 'all') [none]:")
     try:
         choice = input("  > ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -808,7 +808,8 @@ def _push_ahead(
         return 0
 
     if not choice:
-        choice = "all"
+        print("No conversations selected.")
+        return 0
 
     indices = _parse_selection(choice, len(ahead_items))
     if not indices:
@@ -983,7 +984,7 @@ def cmd_repair(args):
 
 
 def cmd_sync(args):
-    """Pull behind conversations then push ahead ones — fully automatic."""
+    """Pull behind conversations, then prompt before pushing ahead ones."""
     sync_dir = _require_sync_repo()
     backend = get_backend()
     snapshots_dir = paths.get_snapshots_dir()
@@ -1007,7 +1008,7 @@ def cmd_sync(args):
 
     # Step 3: Push — export ahead conversations from Cursor DBs into snapshots
     print("\n── Push ──")
-    pushed = _push_ahead(sync_dir, auto=True, backend=backend)
+    pushed = _push_ahead(sync_dir, auto=False, backend=backend)
     if pushed == 0:
         print("  Nothing to push")
 
@@ -1660,14 +1661,17 @@ def cmd_doctor(args):
 
     if args.recover:
         if args.select:
-            print(f"  Select chats to recover (e.g. 1,3,5 or 1-3 or 'all') [all]:")
+            print(
+                f"  Select chats to recover (e.g. 1 or 1,3,5 or 1-3 or 'all') [none]:"
+            )
             try:
                 choice = input("  > ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return
             if not choice:
-                choice = "all"
+                print("No chats selected.")
+                return
             indices = _parse_selection(choice, len(orphaned))
             if not indices:
                 return
@@ -1934,7 +1938,7 @@ def main():
     # ── sync ──────────────────────────────────────────────────────
     p_sync = subparsers.add_parser(
         "sync",
-        help="Pull behind + push ahead — one command to stay in sync across machines",
+        help="Pull remote snapshots, then prompt before pushing local chats",
     )
     p_sync.set_defaults(func=cmd_sync)
 
